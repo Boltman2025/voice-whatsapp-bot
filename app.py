@@ -4,14 +4,15 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# عميل OpenAI باستعمال المفتاح من Environment Variables في Render
+# عميل OpenAI باستعمال المفتاح من Render
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 @app.route("/")
 def index():
     return "Bot is running"
 
-# مسار نصي ذكي (كما عملناه سابقاً)
+
+# مسار الذكاء النصي
 @app.route("/voice")
 def voice():
     user_msg = request.args.get("msg", "").strip()
@@ -27,8 +28,7 @@ def voice():
 - إذا طلب المنيو، أعطه منيو مختصراً.
 - إذا أراد طلباً، لخّص ما يريد: الأطباق، الكميات، الأحجام.
 - اسأله بلطف عن العنوان إذا لم يذكره.
-- استعمل الدارجة الجزائرية البسيطة + العربية الفصحى الخفيفة.
-- الرد يجب أن يكون في 3 أسطر كحد أقصى.
+- الرد يجب أن يكون في 3 أسطر.
 """
 
     try:
@@ -36,7 +36,6 @@ def voice():
             model="gpt-4.1-mini",
             input=prompt,
         )
-
         ai_reply = response.output[0].content[0].text
         return ai_reply
 
@@ -44,7 +43,8 @@ def voice():
         return f"Error while contacting AI: {e}", 500
 
 
-# 🔊 مسار جديد: تحويل نص إلى صوت MP3
+
+# 🔊 مسار: تحويل النص إلى صوت
 @app.route("/speak")
 def speak():
     text = request.args.get("msg", "").strip()
@@ -53,15 +53,14 @@ def speak():
         return "Please provide ?msg= in the URL", 400
 
     try:
-        # إنشاء صوت من النص باستعمال نموذج TTS
+        # توليد الصوت
         speech = client.audio.speech.create(
             model="gpt-4o-mini-tts",
-            voice="alloy",      # صوت افتراضي
-            format="mp3",
+            voice="alloy",
             input=text,
         )
 
-        audio_bytes = speech.read()  # نحصل على البيانات الصوتية كـ bytes
+        audio_bytes = speech.read()
 
         return Response(
             audio_bytes,
