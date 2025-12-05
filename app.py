@@ -1,98 +1,90 @@
-from flask import Flask, request, Response
-import os
+from flask import Flask, request, jsonify, Response
 from openai import OpenAI
+import os
 
 app = Flask(__name__)
 
-# عميل OpenAI باستعمال المفتاح من Render
+# --- OpenAI client ---
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
-# ===============================
-#       الصفحة الرئيسية
-# ===============================
+# -----------------------------------------------------
+# 🟦 صفحة الفحص الأساسية (Landing)
+# -----------------------------------------------------
 @app.route("/")
-def index():
+def home():
     return "Bot is running"
 
 
-# ===============================
-#    ذكاء نصي (فهم الطلبات)
-# ===============================
+# -----------------------------------------------------
+# 🟩 1) مسار الرد النصي /voice
+# -----------------------------------------------------
 @app.route("/voice")
 def voice():
-    user_msg = request.args.get("msg", "").strip()
+    msg = request.args.get("msg", "")
 
-    if not user_msg:
-        return "Please provide ?msg= in the URL", 400
-
-    prompt = f"""
-أنت وكيل ذكي لمطعم بيتزا في الجزائر.
-الزبون قال: "{user_msg}"
-
-مهمتك:
-- إذا طلب المنيو، أعطه منيو مختصراً.
-- إذا أراد طلباً، لخّص ما يريد: الأطباق، الكميات، الأحجام.
-- اسأله بلطف عن العنوان إذا لم يذكره.
-- استعمل الدارجة الجزائرية السهلة.
-- الرد لا يتجاوز 3 أسطر.
-"""
+    if not msg:
+        return "يرجى إرسال msg ؟msg= ", 400
 
     try:
         response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt,
+            model="gpt-4o-mini",
+            input=f"""
+            أنت مساعد مطعم. تعامل مع هذه الرسالة كما لو أنها طلب من زبون:
+            {msg}
+            """,
         )
-        ai_reply = response.output[0].content[0].text
-        return ai_reply
+
+        reply = response.output_text
+        return reply
 
     except Exception as e:
         return f"Error while contacting AI: {e}", 500
 
 
-
-# ===============================
-#  تحويل النص إلى صوت (TTS)
-# ===============================
+# -----------------------------------------------------
+# 🟧 2) مسار إنتاج الصوت من نص /speak
+# -----------------------------------------------------
 @app.route("/speak")
 def speak():
-    text = request.args.get("msg", "").strip()
+    text = request.args.get("text", "")
 
     if not text:
-        return "Please provide ?msg= in the URL", 400
+        return "يرجى إضافة النص: /speak?text=hello", 400
 
     try:
-        # توليد الصوت من النص
-        speech = client.audio.speech.create(
+        # إنشاء ملف صوتي
+        result = client.audio.speech.create(
             model="gpt-4o-mini-tts",
             voice="alloy",
-            input=text,
+            input=text
         )
 
-        audio_bytes = speech.read()
+        audio_bytes = result.read()
 
         return Response(
             audio_bytes,
             mimetype="audio/mpeg",
-            headers={"Content-Disposition": 'inline; filename="reply.mp3"'}
+            headers={
+                "Content-Disposition": "inline; filename=reply.mp3"
+            }
         )
 
     except Exception as e:
         return f"Error while generating speech: {e}", 500
 
 
-
-# ===============================
-#   صفحة اختبار رفع صوت
-# ===============================
-@app.route("/test-upload", methods=["GET"])
+# -----------------------------------------------------
+# 🟨 3) صفحة رفع ملف صوتي للاختبار /test-upload
+# -----------------------------------------------------
+@app.route("/test-upload")
 def test_upload():
     return """
     <html>
       <body>
         <h3>Test audio transcription</h3>
         <form action="/transcribe" method="post" enctype="multipart/form-data">
-          <p>Select an audio file (مثلاً رسالة واتساب صوتية .ogg أو .mp3):</p>
+          <p>Select an audio file (مثال: رسالة واتساب ogg/mp3):</p>
           <input type="file" name="audio" accept="audio/*" />
           <button type="submit">Transcribe</button>
         </form>
@@ -101,9 +93,9 @@ def test_upload():
     """
 
 
-# ===============================
-#    تفريغ صوت إلى نص (Whisper)
-# ===============================
+# -----------------------------------------------------
+# 🟨 4) مسار تفريغ الصوت /transcribe
+# -----------------------------------------------------
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     audio_file = request.files.get("audio")
@@ -112,12 +104,20 @@ def transcribe():
         return "No audio file uploaded with name 'audio'.", 400
 
     try:
-        audio_file.stream.seek(0)
-        audio_file.name = audio_file.filename or "audio-file"
+        # قراءة الملف
+        audio_bytes = audio_file.read()
 
+        # تجهيز الملف بالشكل المطلوب من مكتبة OpenAI
+        file_tuple = (
+            audio_file.filename,
+            audio_bytes,
+            audio_file.mimetype or "audio/mpeg"
+        )
+
+        # طلب التفريغ
         transcript = client.audio.transcriptions.create(
             model="gpt-4o-mini-transcribe",
-            file=audio_file,
+            file=file_tuple
         )
 
         text = transcript.text
@@ -137,10 +137,9 @@ def transcribe():
         return f"Error while transcribing audio: {e}", 500
 
 
-
-# ===============================
-#     تشغيل السيرفر
-# ===============================
+# -----------------------------------------------------
+# 🟥 تشغيل السيرفر
+# -----------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
