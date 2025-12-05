@@ -4,7 +4,7 @@ import requests
 from flask import Flask, request, jsonify
 
 # ---------------------------------
-# إعداد التطبيق و اللوج
+# إعداد التطبيق والـ logging
 # ---------------------------------
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -14,8 +14,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WHAPI_API_URL = os.getenv("WHAPI_API_URL", "https://gate.whapi.cloud")
 WHAPI_TOKEN = os.getenv("WHAPI_TOKEN")
 
+
 # ---------------------------------
-# دالة مساعدة: طلب رد من OpenAI
+# دالة: طلب رد من OpenAI (نص ← نص)
 # ---------------------------------
 def generate_ai_reply(user_text: str) -> str:
     """
@@ -31,7 +32,6 @@ def generate_ai_reply(user_text: str) -> str:
         "Content-Type": "application/json",
     }
 
-    # يمكنك تعديل البرومبت حسب أسلوب المطعم
     data = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -40,7 +40,8 @@ def generate_ai_reply(user_text: str) -> str:
                 "content": (
                     "أنت مساعد مطعم جزائري تتكلّم بالدارجة البسيطة، "
                     "تستقبل الطلبات عبر الواتساب، "
-                    "تسأل عن الكمية، نوع الأكل، والوقت أو التوصيل عند الحاجة."
+                    "تسأل عن الكمية، نوع الأكل، والوقت أو التوصيل عند الحاجة، "
+                    "وتجاوب باختصار وبأسلوب ودود."
                 ),
             },
             {"role": "user", "content": user_text},
@@ -55,12 +56,64 @@ def generate_ai_reply(user_text: str) -> str:
         reply = j["choices"][0]["message"]["content"].strip()
         return reply
     except Exception as e:
-        app.logger.error("Error calling OpenAI: %s", e)
-        return "وقع خلل تقني في الخدمة تاع الذكاء الاصطناعي، جرّب تعاود بعد شوية 😊"
+        app.logger.error("Error calling OpenAI (chat): %s", e)
+        return "وقع خلل تقني في خدمة الذكاء الاصطناعي، جرّب تعاود بعد شوية 😊"
 
 
 # ---------------------------------
-# دالة مساعدة: إرسال رسالة نصّية عبر Whapi
+# دالة: تفريغ صوت من URL باستخدام OpenAI
+# ---------------------------------
+def transcribe_audio_from_url(file_url: str, mime_type: str | None = None) -> str | None:
+    """
+    تحمّل ملف صوتي من رابط (Whapi) وتفريغه نصّياً باستعمال
+    /v1/audio/transcriptions
+    """
+    if not OPENAI_API_KEY:
+        app.logger.error("OPENAI_API_KEY is missing (for audio).")
+        return None
+
+    try:
+        # 1) تحميل الملف من الرابط الذي أعطاه Whapi
+        app.logger.info("Downloading audio from: %s", file_url)
+        audio_resp = requests.get(file_url, timeout=30)
+        audio_resp.raise_for_status()
+        audio_bytes = audio_resp.content
+    except Exception as e:
+        app.logger.error("Error downloading audio file: %s", e)
+        return None
+
+    # 2) إرسال الملف إلى OpenAI للتفريغ
+    url = "https://api.openai.com/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        # لا نحدّد Content-Type هنا، requests يتكفّل به (multipart/form-data)
+    }
+
+    files = {
+        "file": (
+            "audio.ogg",
+            audio_bytes,
+            mime_type or "audio/ogg",
+        )
+    }
+    data = {
+        "model": "gpt-4o-mini-transcribe",  # أو "whisper-1" إذا أردت
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        resp.raise_for_status()
+        j = resp.json()
+        text = j.get("text") or ""
+        app.logger.info("Transcription result: %s", text)
+        return text.strip() or None
+    except Exception as e:
+        app.logger.error("Error calling OpenAI (audio): %s | body=%s", e, resp.text if 'resp' in locals() else "")
+        return None
+
+
+# ---------------------------------
+# دالة: إرسال رسالة نصية عبر Whapi
 # ---------------------------------
 def send_whapi_text(to_number: str, body: str):
     """
@@ -78,7 +131,7 @@ def send_whapi_text(to_number: str, body: str):
         "Content-Type": "application/json",
     }
     payload = {
-        "to": to_number,  # مثال: "213664226955"
+        "to": to_number,  # مثال: "213776206336"
         "body": body,
     }
 
@@ -98,13 +151,14 @@ def index():
 
 
 # ---------------------------------
-# Webhook من Whapi
+# Webhook من Whapi (نص + صوت)
 # ---------------------------------
 @app.route("/whapi", methods=["POST"])
 def whapi_webhook():
     """
-    يستقبل Webhook من Whapi، يقرأ الرسالة النصيّة،
-    يرسلها إلى OpenAI، ثم يردّ على نفس الرقم عبر Whapi.
+    يستقبل Webhook من Whapi:
+    - إذا كانت الرسالة نصية: يردّ مباشرة بالنص من OpenAI
+    - إذا كانت الرسالة صوتية (voice): يحوّل الصوت إلى نص ثم يردّ
     """
     data = request.get_json(force=True, silent=True) or {}
     app.logger.info("Incoming Whapi webhook: %s", data)
@@ -114,18 +168,10 @@ def whapi_webhook():
         return jsonify({"ok": True})
 
     msg = messages[0]
-
-    # نوع الرسالة (text, audio, action, ...)
     msg_type = msg.get("type")
-    if msg_type != "text":
-        app.logger.info("Ignoring non-text message of type: %s", msg_type)
-        return jsonify({"ok": True})
 
-    # 🔢 استخراج رقم المرسل من هيكل Whapi
-    # Whapi يرسل الحقل باسم "from"
+    # 🔢 استخراج رقم المرسل
     from_number = msg.get("from")
-
-    # أحياناً الرقم يكون في chat_id بصيغة 213xxx@s.whatsapp.net
     if not from_number:
         chat_id = msg.get("chat_id")
         if chat_id and "@s.whatsapp.net" in chat_id:
@@ -135,27 +181,62 @@ def whapi_webhook():
         app.logger.warning("No from_number in webhook payload.")
         return jsonify({"ok": True})
 
-    # 📩 النص الذي أرسله الزبون
-    text_body = ""
-    text_obj = msg.get("text") or {}
-    if isinstance(text_obj, dict):
-        text_body = text_obj.get("body", "")
+    # -------------------------
+    # 1) رسائل نصيّة
+    # -------------------------
+    if msg_type == "text":
+        text_obj = msg.get("text") or {}
+        user_text = ""
+        if isinstance(text_obj, dict):
+            user_text = text_obj.get("body", "")
 
-    if not text_body:
-        app.logger.info("No text body in message.")
+        if not user_text:
+            app.logger.info("No text body in text message.")
+            return jsonify({"ok": True})
+
+        ai_reply = generate_ai_reply(user_text)
+        send_whapi_text(from_number, ai_reply)
         return jsonify({"ok": True})
 
-    # 🧠 نولّد الرد من الذكاء الاصطناعي
-    reply = generate_ai_reply(text_body)
+    # -------------------------
+    # 2) رسائل صوتية (voice)
+    # -------------------------
+    if msg_type == "voice":
+        voice_info = msg.get("voice") or {}
+        file_url = voice_info.get("link")
+        mime_type = voice_info.get("mime_type")
 
-    # 📤 نردّ على نفس الرقم عبر Whapi
-    send_whapi_text(from_number, reply)
+        if not file_url:
+            app.logger.error("Voice message without 'link' field.")
+            send_whapi_text(
+                from_number,
+                "استقبلت فويس لكن ما قدرش نحمّل الملف، جرّب تعاود ترسلو 🙏",
+            )
+            return jsonify({"ok": True})
 
+        # تفريغ الصوت إلى نص
+        transcript = transcribe_audio_from_url(file_url, mime_type)
+        if not transcript:
+            send_whapi_text(
+                from_number,
+                "ما قدرناش نفهم الرسالة الصوتية (مشكلة تقنية)، لو تقدر ابعث نفس الشيء كتابيًا 🌟",
+            )
+            return jsonify({"ok": True})
+
+        # إرسال النص إلى الذكاء الاصطناعي ثم الرد
+        ai_reply = generate_ai_reply(transcript)
+        send_whapi_text(from_number, ai_reply)
+        return jsonify({"ok": True})
+
+    # -------------------------
+    # 3) أي أنواع أخرى نتجاهلها
+    # -------------------------
+    app.logger.info("Ignoring non-supported message type: %s", msg_type)
     return jsonify({"ok": True})
 
 
 # ---------------------------------
-# تشغيل محلي (غير مستعمل على Render)
+# تشغيل محلي (غير مستعمل على Render غالبًا)
 # ---------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
