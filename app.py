@@ -1,113 +1,138 @@
 import os
+import io
+import json
 import requests
 from flask import Flask, request, Response
+
 from openai import OpenAI
 
-# ==========================
-# إعدادات عامة
-# ==========================
+# 🔑 تهيئة عميل OpenAI
+client = OpenAI()
+
+# نموذج المحادثة
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+# 🔗 بيانات UltraMsg من متغيرات البيئة
+# مثال على القيمة الصحيحة للـ INSTANCE:
+# ULTRA_INSTANCE_ID = "instance154392"
+ULTRA_INSTANCE_ID = os.getenv("ULTRA_INSTANCE_ID", "")
+ULTRA_TOKEN = os.getenv("ULTRA_TOKEN", "")
+
+if ULTRA_INSTANCE_ID:
+    ULTRA_BASE_URL = f"https://api.ultramsg.com/{ULTRA_INSTANCE_ID}"
+else:
+    ULTRA_BASE_URL = None
 
 app = Flask(__name__)
 
-# مفتاح OpenAI من متغيرات البيئة في Render
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# إعدادات UltraMsg (ضع بيانات الـ Instance الخاصة بك)
-ULTRA_INSTANCE_ID = "instance154392"   # مثال: instance154392
-ULTRA_TOKEN = "qr5ee4h37ptjvz53"       # Token من لوحة UltraMsg
-
-
-# ==========================
-# دالة مساعدة: رد ذكي من AI
-# ==========================
-
-def generate_ai_response(user_message: str) -> str:
+# ======================
+#  مساعدة: تفريغ صوت إلى نص
+# ======================
+def transcribe_audio_bytes(audio_bytes, filename="audio.ogg", mime_type="audio/ogg"):
     """
-    تأخذ رسالة المستخدم نصاً وتعيد ردّاً ذكياً من نموذج GPT
-    بأسلوب مساعد مطعم في الجزائر.
+    يأخذ بايتات ملف صوتي (مثل فويس واتساب) ويعيد النص المستخرج منه.
     """
+    bio = io.BytesIO(audio_bytes)
+    bio.name = filename
+
+    transcript = client.audio.transcriptions.create(
+        model="gpt-4o-mini-transcribe",
+        file=bio,
+        response_format="text",
+    )
+    return transcript.text
+
+
+# ======================
+#  مساعدة: توليد رد ذكي على طلب الزبون
+# ======================
+def generate_order_reply(user_text: str) -> str:
+    """
+    هنا نحدد شخصية البوت: موظف استقبال طلبات لمطعم / محل.
+    يمكن لاحقًا تخصيصه حسب كل مطعم.
+    """
+    system_prompt = (
+        "أنت بوت طلبات لمطعم في الجزائر. "
+        "تتكلم بالدارجة الجزائرية مع لمسة عربية فصيحة بسيطة. "
+        "مهمّتك:\n"
+        "- تفهم واش الزبون حاب يطلب (مأكولات / مشروبات ...).\n"
+        "- إذا يطلب المنيو، تعطيه قائمة مختصرة بأمثلة، ليس كاملة جدًا.\n"
+        "- إذا الطلب واضح، تعيد تلخيص الطلب بشكل مرتب، "
+        "وتطلب من الزبون تأكيد نهائي (نعم / لا أو تعديل بسيط).\n"
+        "- إذا ناقص معلومات (مثلاً الحجم، العدد، النكهة، العنوان، طريقة الدفع)، "
+        "اسأله أسئلة قصيرة وواضحة.\n"
+        "- لا تذكر أنك نموذج ذكاء اصطناعي، تصرّف كموظف استقبال عادي.\n"
+        "- لا تتكلم في السياسة أو مواضيع خارج الطلبات.\n"
+    )
+
     try:
-        resp = client.responses.create(
-            model="gpt-4o-mini",
-            input=f"""
-أنت مساعد افتراضي لمطعم في الجزائر.
-تكلّم بالعامية الجزائرية البسيطة + عربية فصحى خفيفة.
-مهامك:
-- ترحيب بالزبون بأدب.
-- فهم الطلب (أكل/شراب/سؤال) وطرح أسئلة توضيحية قصيرة إذا لزم.
-- تلخيص الطلب في سطر واحد في النهاية.
-
-هذه هي رسالة الزبون:
-{user_message}
-            """,
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text},
+            ],
         )
-        return resp.output_text
+        reply = completion.choices[0].message.content
+        return reply.strip()
     except Exception as e:
-        return f"صار مشكل تقني صغير، جرّب تعاود بعد لحظات. (تفاصيل: {e})"
+        print("AI error:", e, flush=True)
+        return "صارت مشكل تقني في معالجة الطلب، جرّب تعاود تبعث بعد شوية."
 
 
-# ==========================
-# 1) صفحة بسيطة لاختبار السيرفر
-# ==========================
+# ======================
+#  مساعدة: إرسال رسالة نصية عبر UltraMsg
+# ======================
+def send_text_message(to_chat_id: str, body: str):
+    """
+    إرسال رسالة نصية إلى نفس الشات عبر UltraMsg.
+    to_chat_id يكون مثل: 2136XXXXXXX@c.us
+    """
+    if not ULTRA_BASE_URL or not ULTRA_TOKEN:
+        print("UltraMsg config missing (ULTRA_INSTANCE_ID / ULTRA_TOKEN).", flush=True)
+        return
 
-@app.route("/")
+    url = f"{ULTRA_BASE_URL}/messages/chat"
+    data = {
+        "token": ULTRA_TOKEN,
+        "to": to_chat_id,
+        "body": body,
+        "priority": 10,
+        "referenceId": "",
+    }
+
+    try:
+        resp = requests.post(url, data=data, timeout=20)
+        print("UltraMsg send response:", resp.status_code, resp.text, flush=True)
+    except Exception as e:
+        print("Error sending message via UltraMsg:", e, flush=True)
+
+
+# ======================
+#  المسار الرئيسي: فقط للتجربة
+# ======================
+@app.route("/", methods=["GET"])
 def index():
     return "Bot is running"
 
 
-# ==========================
-# 2) مسار نصّي /voice (للتجارب من المتصفح)
-#    مثال:
-#    https://YOUR-APP.onrender.com/voice?msg=سلام
-# ==========================
-
-@app.route("/voice")
+# ======================
+#  /voice: اختبار الرد النصي من السيرفر
+# ======================
+@app.route("/voice", methods=["GET"])
 def voice():
     msg = request.args.get("msg", "").strip()
-
     if not msg:
-        return "Please provide ?msg= in the URL", 400
+        return "أرسل بارامتر msg في الرابط.", 400
 
-    reply = generate_ai_response(msg)
+    reply = generate_order_reply(msg)
     return reply
 
 
-# ==========================
-# 3) مسار /speak لتحويل نص إلى صوت MP3
-#    (لا يُستعمل حالياً في الواتساب، فقط للتجارب)
-# ==========================
-
-@app.route("/speak")
-def speak():
-    text = request.args.get("text", "").strip()
-
-    if not text:
-        return "Please provide ?text= in the URL", 400
-
-    try:
-        speech = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
-            input=text,
-        )
-
-        audio_bytes = speech.read()
-
-        return Response(
-            audio_bytes,
-            mimetype="audio/mpeg",
-            headers={
-                "Content-Disposition": 'inline; filename="reply.mp3"'
-            },
-        )
-    except Exception as e:
-        return f"Error while generating speech: {e}", 500
-
-
-# ==========================
-# 4) صفحة ويب بسيطة لاختبار رفع ملف صوتي
-# ==========================
-
+# ======================
+#  صفحة اختبار لرفع ملف صوتي يدويًا
+# ======================
 @app.route("/test-upload", methods=["GET"])
 def test_upload():
     return """
@@ -124,10 +149,9 @@ def test_upload():
     """
 
 
-# ==========================
-# 5) استقبال ملف صوتي وتفريغه نصًّا (من المتصفح)
-# ==========================
-
+# ======================
+#  /transcribe: تفريغ ملف صوتي مرفوع من المتصفح
+# ======================
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     audio_file = request.files.get("audio")
@@ -136,15 +160,10 @@ def transcribe():
         return "No audio file uploaded with name 'audio'.", 400
 
     try:
-        audio_file.stream.seek(0)
-        filename = audio_file.filename or "audio-file.ogg"
+        audio_bytes = audio_file.read()
+        filename = audio_file.filename or "audio.ogg"
 
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=(filename, audio_file.stream.read(), "audio/ogg"),
-        )
-
-        text = transcript.text
+        text = transcribe_audio_bytes(audio_bytes, filename=filename)
 
         return f"""
         <html>
@@ -160,115 +179,92 @@ def transcribe():
         return f"Error while transcribing audio: {e}", 500
 
 
-# ==========================
-# 6) Webhook للواتساب من UltraMsg
-#    - يدعم الآن:
-#      • رسائل نصية (chat)
-#      • رسائل صوتية (audio / ptt) → تفريغ → رد نصي
-# ==========================
-
+# ======================
+#  /whatsapp: Webhook من UltraMsg
+# ======================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
-    try:
-        event = request.json or {}
-        print("Webhook event:", event, flush=True)  # مفيد للـ Logs في Render
+    """
+    هذا المسار تستدعيه UltraMsg عندما تصل رسالة جديدة.
+    نعالج:
+    - type == 'chat'  → نص
+    - type == 'ptt' أو 'audio' → فويس
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    print("Webhook event:", json.dumps(payload, ensure_ascii=False), flush=True)
 
-        data = event.get("data", {})
+    event_type = payload.get("event_type")
+    if event_type != "message_received":
+        # نتجاهل الأحداث الأخرى
+        return Response("ignored", status=200)
 
-        sender = data.get("from")            # رقم المرسل (chatId)
-        msg_type = data.get("type")          # chat, audio, ptt, image ...
-        body = data.get("body", "")          # نص الرسالة إن وُجد
+    data = payload.get("data", {}) or {}
 
-        if not sender:
-            return "no sender", 200
+    msg_type = data.get("type")          # chat, ptt, audio, ...
+    from_chat = data.get("from")         # مثل 2136XXXXXXX@c.us
+    body = (data.get("body") or "").strip()
+    msg_id = data.get("id")
 
-        # رابط API لإرسال رسائل واتساب
-        base_url = f"https://api.ultramsg.com/{ULTRA_INSTANCE_ID}/messages"
+    if not from_chat:
+        return Response("no from", status=200)
 
-        # -----------------------------
-        # 6.A) إذا كانت الرسالة نصية
-        # -----------------------------
-        if msg_type == "chat":
-            user_text = body.strip()
-            if not user_text:
-                return "empty text", 200
+    reply_text = None
 
-            reply_text = generate_ai_response(user_text)
+    # ---------- 1) رسالة نصية عادية ----------
+    if msg_type == "chat":
+        if not body:
+            reply_text = "مرحبا 👋، ابعثلي الطلب تاعك في رسالة أو فويس."
+        else:
+            reply_text = generate_order_reply(body)
 
-            payload = {
-                "token": ULTRA_TOKEN,
-                "to": sender,
-                "body": reply_text,
-                "priority": "high",
-            }
-
-            requests.post(f"{base_url}/chat", data=payload)
-            return "ok", 200
-
-        # -----------------------------
-        # 6.B) إذا كانت الرسالة صوتية (فويس)
-        # type غالباً: "audio" أو "ptt"
-        # -----------------------------
-        if msg_type in ("audio", "ptt"):
-            audio_url = data.get("url")
-            if not audio_url:
-                # لو لم يُرسل الرابط لأي سبب، نرجع رد عادي
-                fallback = "استقبلت فويس لكن ما قدرش نحمّل الملف، جرّب تعاود ترسلو."
-                payload = {
-                    "token": ULTRA_TOKEN,
-                    "to": sender,
-                    "body": fallback,
-                    "priority": "high",
-                }
-                requests.post(f"{base_url}/chat", data=payload)
-                return "no_audio_url", 200
-
-            # تحميل ملف الصوت من UltraMsg/WhatsApp
-            audio_bytes = requests.get(audio_url).content
-
-            # تفريغ الصوت إلى نص
+    # ---------- 2) رسالة صوتية (فويس / ptt) ----------
+    elif msg_type in ("ptt", "audio", "voice"):
+        if not ULTRA_BASE_URL or not ULTRA_TOKEN:
+            reply_text = "استقبلت فويس، لكن إعدادات السيرفر ناقصة. تقدر تبعث طلبك مكتوب مؤقتًا."
+        elif not msg_id:
+            reply_text = "استقبلت فويس لكن ما قدرش نحمّل الملف، جرّب تعاود ترسلو."
+        else:
             try:
-                transcript = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=("audio.ogg", audio_bytes, "audio/ogg"),
+                # ⚠ ملاحظة:
+                # حسب توثيق UltraMsg، استرجاع ميديا الرسالة يكون عبر endpoint خاص بالـ media.
+                # الصيغة الشائعة:
+                #   GET https://api.ultramsg.com/{instance_id}/messages/media/{message_id}?token=XXXX
+                #
+                # إذا تغيّر عندهم المسار، فقط عدّل هذا الـ URL حسب التوثيق.
+                media_url = f"{ULTRA_BASE_URL}/messages/media/{msg_id}"
+                resp = requests.get(
+                    media_url,
+                    params={"token": ULTRA_TOKEN},
+                    timeout=30,
                 )
-                user_text = transcript.text
+
+                if not resp.ok:
+                    print("Error downloading media:", resp.status_code, resp.text, flush=True)
+                    reply_text = "استقبلت فويس لكن ما قدرش نحمّل الملف، جرّب تعاود ترسلو."
+                else:
+                    audio_bytes = resp.content
+                    text = transcribe_audio_bytes(audio_bytes)
+                    print("Voice transcription:", text, flush=True)
+                    reply_text = generate_order_reply(text)
             except Exception as e:
-                error_reply = f"صار مشكل في قراءة الفويس، حاول تكتبلي نصًا. (تفاصيل: {e})"
-                payload = {
-                    "token": ULTRA_TOKEN,
-                    "to": sender,
-                    "body": error_reply,
-                    "priority": "high",
-                }
-                requests.post(f"{base_url}/chat", data=payload)
-                return "stt_error", 200
+                print("Error handling voice message:", e, flush=True)
+                reply_text = "استقبلت فويس لكن ما قدرش نحمّل الملف، جرّب تعاود ترسلو."
 
-            # توليد رد ذكي اعتماداً على النص المستخرج
-            reply_text = generate_ai_response(user_text)
+    # ---------- 3) أنواع أخرى ----------
+    else:
+        reply_text = "مرحبا 👋، أرسل رسالة نصية أو فويس باش نقدر نفهم الطلب تاعك."
 
-            # إرسال الرد نصّيًا
-            payload = {
-                "token": ULTRA_TOKEN,
-                "to": sender,
-                "body": reply_text,
-                "priority": "high",
-            }
-            requests.post(f"{base_url}/chat", data=payload)
+    # إرسال الرد إلى الزبون
+    if reply_text:
+        send_text_message(from_chat, reply_text)
 
-            return "ok", 200
-
-        # أنواع أخرى (صورة، فيديو...) لا نعالجها الآن
-        return "unsupported_type", 200
-
-    except Exception as e:
-        return f"Webhook error: {e}", 500
+    # مهم: نرجع 200 حتى لا تعيد UltraMsg الإرسال
+    return Response("ok", status=200)
 
 
-# ==========================
-# تشغيل التطبيق محلياً أو على Render
-# ==========================
-
+# ======================
+#  تشغيل محلي (Render يستعمل gunicorn app:app)
+# ======================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
