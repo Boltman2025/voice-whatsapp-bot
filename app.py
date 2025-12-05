@@ -12,16 +12,12 @@ client = OpenAI()
 # نموذج المحادثة
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-# 🔗 بيانات UltraMsg من متغيرات البيئة
-# مثال على القيمة الصحيحة للـ INSTANCE:
-# ULTRA_INSTANCE_ID = "instance154392"
-ULTRA_INSTANCE_ID = os.getenv("ULTRA_INSTANCE_ID", "")
-ULTRA_TOKEN = os.getenv("ULTRA_TOKEN", "")
+# 🔗 بيانات UltraMsg مباشرة (للتجارب)
+ULTRA_INSTANCE_ID = "instance154392"       # اكتب هنا الـ Instance ID كما يظهر في UltraMsg
+ULTRA_TOKEN = "qr5ee4h37ptjvz53"           # اكتب هنا الـ Token الخاص بالـ Instance
 
-if ULTRA_INSTANCE_ID:
-    ULTRA_BASE_URL = f"https://api.ultramsg.com/{ULTRA_INSTANCE_ID}"
-else:
-    ULTRA_BASE_URL = None
+ULTRA_BASE_URL = f"https://api.ultramsg.com/{ULTRA_INSTANCE_ID}"
+
 
 app = Flask(__name__)
 
